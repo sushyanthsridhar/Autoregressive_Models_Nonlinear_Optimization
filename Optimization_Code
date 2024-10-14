@@ -1,0 +1,83 @@
+!pip install docplex
+from docplex.mp.model import Model
+import pandas as pd
+import sys
+
+def load_data(file_path):
+    try:
+        data = pd.read_csv(file_path)
+        required_columns = {'Month', 'Demand', 'StorageCost', 'HoldingCost'}
+        if not required_columns.issubset(data.columns):
+            raise ValueError(f"The CSV file must contain the following columns: {required_columns}")
+
+        months = data['Month'].tolist()
+        demand = data['Demand'].tolist()
+        storage_cost = data['StorageCost'].tolist()
+        holding_cost = data['HoldingCost'].tolist()
+
+        return months, demand, storage_cost, holding_cost
+    except FileNotFoundError:
+        print(f"Error: File not found at {file_path}.")
+        sys.exit(1)
+    except ValueError as ve:
+        print(f"Error: {ve}")
+        sys.exit(1)
+
+def build_model(months, demand, storage_cost, holding_cost, setup_cost, capacity):
+    model = Model("Lot Sizing Problem")
+
+    order_quantity = model.continuous_var_list(months, name="OrderQuantity")
+    setup_indicator = model.binary_var_list(months, name="SetupIndicator")
+
+    total_setup_cost = setup_cost * model.sum(setup_indicator[t] for t in months)
+    total_production_cost = model.sum(holding_cost[t] * order_quantity[t] for t in months)
+    total_inventory_cost = model.sum(storage_cost[t] * order_quantity[t] for t in months)
+    
+    model.minimize(total_setup_cost + total_production_cost + total_inventory_cost)
+
+    model.add_constraint(model.sum(order_quantity) <= model.sum(demand), ctname="TotalOrderQuantity")
+
+    for t in months:
+        model.add_constraint(order_quantity[t] <= capacity * setup_indicator[t], ctname=f"CapacityConstraint_{t}")
+
+    inventory = [model.continuous_var(name=f"Inventory_{t}") for t in months]
+    inventory[0].lb = 0
+
+    for t in months:
+        if t == 0:
+            model.add_constraint(inventory[t] == order_quantity[t] - demand[t], ctname="InitialInventory")
+        else:
+            model.add_constraint(inventory[t] == inventory[t-1] + order_quantity[t] - demand[t], ctname=f"InventoryBalance_{t}")
+
+    return model, order_quantity, inventory
+
+def solve_model(model):
+    try:
+        solution = model.solve(log_output=True)
+        if not solution:
+            print("No feasible solution found.")
+            sys.exit(1)
+        return solution
+    except Exception as e:
+        print(f"An error occurred during model solving: {e}")
+        sys.exit(1)
+
+def display_solution(solution, order_quantity, inventory, months):
+    print(f"Total Cost: {solution.objective_value:.2f}")
+    for t in months:
+        print(f"Month {t + 1}: Order Quantity = {order_quantity[t].solution_value:.2f}, "
+              f"Inventory = {inventory[t].solution_value:.2f}")
+
+def main():
+    file_path = input("Enter the path to your data CSV file: ").strip()
+    months, demand, storage_cost, holding_cost = load_data(file_path)
+
+    setup_cost = float(input("Enter the setup cost: ").strip())
+    capacity = float(input("Enter the production capacity: ").strip())
+
+    model, order_quantity, inventory = build_model(months, demand, storage_cost, holding_cost, setup_cost, capacity)
+    solution = solve_model(model)
+    display_solution(solution, order_quantity, inventory, months)
+
+if __name__ == "__main__":
+    main()
